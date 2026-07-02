@@ -10,16 +10,30 @@ import java.util.Arrays;
  */
 public class TransformRule {
 
+    private String name;
     private final String protocol; // "TCP" or "UDP"
     private byte[] request;
     private byte[] response;
     private volatile boolean enabled;
 
     public TransformRule(String protocol, byte[] request, byte[] response, boolean enabled) {
+        this("", protocol, request, response, enabled);
+    }
+
+    public TransformRule(String name, String protocol, byte[] request, byte[] response, boolean enabled) {
+        this.name = name != null ? name : "";
         this.protocol = protocol;
         this.request = request != null ? request : new byte[0];
         this.response = response != null ? response : new byte[0];
         this.enabled = enabled;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name != null ? name : "";
     }
 
     public String getProtocol() {
@@ -57,6 +71,7 @@ public class TransformRule {
 
     @Override
     public String toString() {
-        return String.format("[%s] req %dB → resp %dB", protocol, request.length, response.length);
+        String summary = String.format("[%s] req %dB → resp %dB", protocol, request.length, response.length);
+        return name.isEmpty() ? summary : name + "  " + summary;
     }
 }

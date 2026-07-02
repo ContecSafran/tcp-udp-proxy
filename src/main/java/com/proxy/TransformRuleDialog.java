@@ -11,6 +11,7 @@ import java.awt.*;
 public class TransformRuleDialog extends JDialog {
 
     private final TransformRule rule;
+    private final JTextField nameField = new JTextField();
     private final HexEditor requestEditor = new HexEditor(true);
     private final HexEditor responseEditor = new HexEditor(true);
     private final JCheckBox enabledCheck = new JCheckBox("이 규칙 변환 모드 사용");
@@ -20,9 +21,14 @@ public class TransformRuleDialog extends JDialog {
         super(owner, "변환 규칙 편집 (" + rule.getProtocol() + ")", true);
         this.rule = rule;
 
+        nameField.setText(rule.getName());
         requestEditor.setBytes(rule.getRequest());
         responseEditor.setBytes(rule.getResponse());
         enabledCheck.setSelected(rule.isEnabled());
+
+        JPanel namePanel = new JPanel(new BorderLayout(6, 0));
+        namePanel.add(new JLabel("이름:"), BorderLayout.WEST);
+        namePanel.add(nameField, BorderLayout.CENTER);
 
         JSplitPane center = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
                 titled("Request (이 요청이 오면)", requestEditor),
@@ -45,6 +51,7 @@ public class TransformRuleDialog extends JDialog {
         south.add(buttons, BorderLayout.EAST);
 
         setLayout(new BorderLayout());
+        add(namePanel, BorderLayout.NORTH);
         add(center, BorderLayout.CENTER);
         add(south, BorderLayout.SOUTH);
 
@@ -60,6 +67,7 @@ public class TransformRuleDialog extends JDialog {
     }
 
     private void onOk() {
+        rule.setName(nameField.getText().trim());
         rule.setRequest(requestEditor.getBytes());
         rule.setResponse(responseEditor.getBytes());
         rule.setEnabled(enabledCheck.isSelected());

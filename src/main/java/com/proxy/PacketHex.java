@@ -73,4 +73,30 @@ public final class PacketHex {
         }
         return result;
     }
+
+    /** Encodes bytes as a continuous uppercase hex string (for compact config storage). */
+    public static String toCompactHex(byte[] data) {
+        if (data == null) return "";
+        StringBuilder sb = new StringBuilder(data.length * 2);
+        for (byte b : data) {
+            sb.append(String.format("%02X", b));
+        }
+        return sb.toString();
+    }
+
+    /** Decodes a hex string (whitespace ignored) back into bytes. */
+    public static byte[] fromCompactHex(String hex) {
+        if (hex == null) return new byte[0];
+        StringBuilder clean = new StringBuilder();
+        for (int i = 0; i < hex.length(); i++) {
+            char c = hex.charAt(i);
+            if (Character.digit(c, 16) >= 0) clean.append(c);
+        }
+        int byteCount = clean.length() / 2;
+        byte[] result = new byte[byteCount];
+        for (int i = 0; i < byteCount; i++) {
+            result[i] = (byte) Integer.parseInt(clean.substring(i * 2, i * 2 + 2), 16);
+        }
+        return result;
+    }
 }

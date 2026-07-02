@@ -19,6 +19,7 @@ public class ProxyApp extends JFrame {
     private final JButton startButton = new JButton("Start");
     private final JButton stopButton = new JButton("Stop");
     private final JButton clearPacketsButton = new JButton("Clear Packets");
+    private final JButton saveConfigButton = new JButton("Save Config");
     private final JTextArea logArea = new JTextArea();
     private final JLabel tcpConnectionsLabel = new JLabel("TCP Connections: 0");
     private final JLabel udpSessionsLabel = new JLabel("UDP Sessions: 0");
@@ -51,6 +52,7 @@ public class ProxyApp extends JFrame {
         controlPanel.add(startButton);
         controlPanel.add(stopButton);
         controlPanel.add(clearPacketsButton);
+        controlPanel.add(saveConfigButton);
 
         JPanel statusPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         statusPanel.add(tcpConnectionsLabel);
@@ -84,6 +86,7 @@ public class ProxyApp extends JFrame {
         startButton.addActionListener(e -> startProxy());
         stopButton.addActionListener(e -> stopProxy());
         clearPacketsButton.addActionListener(e -> clearPackets());
+        saveConfigButton.addActionListener(e -> saveConfig());
 
         packetList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting() && packetList.getSelectedValue() != null) {
@@ -110,6 +113,40 @@ public class ProxyApp extends JFrame {
                 }
             }
         });
+
+        loadConfig();
+    }
+
+    private void loadConfig() {
+        try {
+            ProxyConfig config = ProxyConfig.load();
+            localPortField.setText(config.localPort);
+            targetIpField.setText(config.targetIp);
+            targetPortField.setText(config.targetPort);
+            transformListModel.clear();
+            for (TransformRule rule : config.rules) {
+                transformListModel.addElement(rule);
+            }
+            refreshRulesSnapshot();
+        } catch (IOException ex) {
+            log("Error loading config: " + ex.getMessage());
+        }
+    }
+
+    private void saveConfig() {
+        ProxyConfig config = new ProxyConfig();
+        config.localPort = localPortField.getText();
+        config.targetIp = targetIpField.getText();
+        config.targetPort = targetPortField.getText();
+        for (int i = 0; i < transformListModel.size(); i++) {
+            config.rules.add(transformListModel.get(i));
+        }
+        try {
+            config.save();
+            log("Config saved to " + ProxyConfig.configFile().getAbsolutePath());
+        } catch (IOException ex) {
+            log("Error saving config: " + ex.getMessage());
+        }
     }
 
     private JPanel buildTransformPanel() {
@@ -150,7 +187,8 @@ public class ProxyApp extends JFrame {
         }
         byte[] request = selected.getData().clone();
         // Seed the response with a copy of the request; the user edits it next.
-        TransformRule rule = new TransformRule(selected.getProtocol(), request, request.clone(), true);
+        String defaultName = "Rule " + (transformListModel.size() + 1);
+        TransformRule rule = new TransformRule(defaultName, selected.getProtocol(), request, request.clone(), true);
         transformListModel.addElement(rule);
         transformList.setSelectedValue(rule, true);
         refreshRulesSnapshot();
