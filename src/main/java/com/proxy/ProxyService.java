@@ -4,10 +4,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.*;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 public class ProxyService {
 
@@ -27,14 +31,39 @@ public class ProxyService {
     private final Consumer<String> logger;
     private final Runnable tcpCountUpdater;
     private final Runnable udpCountUpdater;
+    private final Consumer<PacketInfo> packetListener;
+
+    // Transform (intercept) rules. When an incoming client request matches an
+    // enabled rule's request, the proxy replies with that rule's response
+    // instead of forwarding the request to the target server.
+    private volatile Supplier<List<TransformRule>> transformRulesSupplier = Collections::emptyList;
+
+    public void setTransformRulesSupplier(Supplier<List<TransformRule>> supplier) {
+        this.transformRulesSupplier = supplier != null ? supplier : Collections::emptyList;
+    }
+
+    /** Returns the first enabled rule whose request matches, or null if none. */
+    private TransformRule matchRule(String protocol, byte[] request) {
+        for (TransformRule rule : transformRulesSupplier.get()) {
+            if (rule.matches(protocol, request)) {
+                return rule;
+            }
+        }
+        return null;
+    }
 
     public ProxyService(int localPort, String targetIp, int targetPort, Consumer<String> logger, Runnable tcpCountUpdater, Runnable udpCountUpdater) {
+        this(localPort, targetIp, targetPort, logger, tcpCountUpdater, udpCountUpdater, packet -> { });
+    }
+
+    public ProxyService(int localPort, String targetIp, int targetPort, Consumer<String> logger, Runnable tcpCountUpdater, Runnable udpCountUpdater, Consumer<PacketInfo> packetListener) {
         this.localPort = localPort;
         this.targetIp = targetIp;
         this.targetPort = targetPort;
         this.logger = logger;
         this.tcpCountUpdater = tcpCountUpdater;
         this.udpCountUpdater = udpCountUpdater;
+        this.packetListener = packetListener;
     }
 
     public void start() throws IOException, BindException {
@@ -103,41 +132,94 @@ public class ProxyService {
         tcpCountUpdater.run();
         logger.accept("[TCP] Client connected: " + clientSocket.getRemoteSocketAddress());
 
+        // Connect to the target for traffic that no rule intercepts. If the target
+        // is unreachable we still serve matching rules (intercept-only).
+        Socket targetSocket = null;
         try {
-            Socket targetSocket = new Socket(targetIp, targetPort);
-            executorService.submit(() -> forwardData(clientSocket, targetSocket, "Client -> Target"));
-            executorService.submit(() -> forwardData(targetSocket, clientSocket, "Target -> Client"));
+            targetSocket = new Socket(targetIp, targetPort);
         } catch (IOException e) {
-            logger.accept("[TCP] Error connecting to target: " + e.getMessage());
-            try {
-                clientSocket.close();
-            } catch (IOException ioException) { /* ignore */ }
-            activeTcpConnections.decrementAndGet();
-            tcpCountUpdater.run();
+            logger.accept("[TCP] Target unreachable, intercept-only mode: " + e.getMessage());
         }
+
+        final Socket target = targetSocket;
+        if (target != null) {
+            executorService.submit(() -> pumpTargetToClient(target, clientSocket));
+        }
+        // The client-reading task owns the connection lifecycle (and the counter).
+        executorService.submit(() -> interceptOrForwardClient(clientSocket, target));
     }
 
-    private void forwardData(Socket source, Socket destination, String direction) {
-        try (InputStream input = source.getInputStream(); OutputStream output = destination.getOutputStream()) {
+    /**
+     * Reads each chunk from the client. If it matches an enabled transform rule,
+     * the rule's response is written straight back to the client; otherwise the
+     * chunk is forwarded to the target (or dropped if there is no target).
+     */
+    private void interceptOrForwardClient(Socket clientSocket, Socket targetSocket) {
+        String remote = String.valueOf(clientSocket.getRemoteSocketAddress());
+        try {
+            InputStream input = clientSocket.getInputStream();
+            OutputStream toClient = clientSocket.getOutputStream();
+            OutputStream toTarget = targetSocket != null ? targetSocket.getOutputStream() : null;
+
             byte[] buffer = new byte[4096];
             int read;
             while ((read = input.read(buffer)) != -1) {
-                output.write(buffer, 0, read);
-                logger.accept(String.format("[TCP] %s (%s): %d bytes", direction, source.getRemoteSocketAddress(), read));
+                byte[] request = Arrays.copyOf(buffer, read);
+                packetListener.accept(new PacketInfo("TCP", "Client -> Target", remote, request));
+
+                TransformRule rule = matchRule("TCP", request);
+                if (rule != null) {
+                    byte[] response = rule.getResponse();
+                    toClient.write(response);
+                    toClient.flush();
+                    logger.accept(String.format("[TCP][Transform] Client(%s) matched rule -> response %d bytes", remote, response.length));
+                    packetListener.accept(new PacketInfo("TCP", "Proxy -> Client (transform)", remote, Arrays.copyOf(response, response.length)));
+                } else if (toTarget != null) {
+                    toTarget.write(buffer, 0, read);
+                    toTarget.flush();
+                    logger.accept(String.format("[TCP] Client -> Target (%s): %d bytes", remote, read));
+                } else {
+                    logger.accept(String.format("[TCP] No matching rule and no target for %s; dropped %d bytes", remote, read));
+                }
             }
         } catch (IOException e) {
             // Connection closed or error
         } finally {
-            try {
-                if (!source.isClosed()) source.close();
-                if (!destination.isClosed()) destination.close();
-            } catch (IOException e) { /* Ignore */ }
+            closeQuietly(clientSocket);
+            closeQuietly(targetSocket);
+            activeTcpConnections.decrementAndGet();
+            tcpCountUpdater.run();
+            logger.accept("[TCP] Connection closed: " + remote);
+        }
+    }
 
-            if (direction.contains("Client")) {
-                activeTcpConnections.decrementAndGet();
-                tcpCountUpdater.run();
-                logger.accept("[TCP] Connection closed: " + source.getRemoteSocketAddress());
+    /** Forwards target responses back to the client (for non-intercepted traffic). */
+    private void pumpTargetToClient(Socket targetSocket, Socket clientSocket) {
+        String remote = String.valueOf(clientSocket.getRemoteSocketAddress());
+        try {
+            InputStream input = targetSocket.getInputStream();
+            OutputStream output = clientSocket.getOutputStream();
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+                output.flush();
+                logger.accept(String.format("[TCP] Target -> Client (%s): %d bytes", remote, read));
+                packetListener.accept(new PacketInfo("TCP", "Target -> Client", remote, Arrays.copyOf(buffer, read)));
             }
+        } catch (IOException e) {
+            // Connection closed or error
+        } finally {
+            closeQuietly(targetSocket);
+            closeQuietly(clientSocket);
+        }
+    }
+
+    private static void closeQuietly(Socket socket) {
+        if (socket != null && !socket.isClosed()) {
+            try {
+                socket.close();
+            } catch (IOException e) { /* ignore */ }
         }
     }
 
@@ -148,10 +230,22 @@ public class ProxyService {
                 DatagramPacket clientPacket = new DatagramPacket(buffer, buffer.length);
                 udpListener.receive(clientPacket);
                 SocketAddress clientAddress = clientPacket.getSocketAddress();
+                byte[] request = Arrays.copyOf(clientPacket.getData(), clientPacket.getLength());
+
+                packetListener.accept(new PacketInfo("UDP", "Client -> Target", String.valueOf(clientAddress), request));
+
+                TransformRule rule = matchRule("UDP", request);
+                if (rule != null) {
+                    byte[] response = rule.getResponse();
+                    udpListener.send(new DatagramPacket(response, response.length, clientPacket.getSocketAddress()));
+                    logger.accept(String.format("[UDP][Transform] Client(%s) matched rule -> response %d bytes", clientAddress, response.length));
+                    packetListener.accept(new PacketInfo("UDP", "Proxy -> Client (transform)", String.valueOf(clientAddress), Arrays.copyOf(response, response.length)));
+                    continue;
+                }
 
                 UdpSession session = udpSessions.computeIfAbsent(clientAddress, addr -> {
                     try {
-                        UdpSession newSession = new UdpSession(clientAddress, targetIp, targetPort, udpListener, logger);
+                        UdpSession newSession = new UdpSession(clientAddress, targetIp, targetPort, udpListener, logger, packetListener);
                         executorService.submit(newSession);
                         udpCountUpdater.run();
                         logger.accept("[UDP] New session for " + clientAddress);
@@ -195,14 +289,16 @@ public class ProxyService {
         private final InetSocketAddress targetAddress;
         private volatile long lastActivity;
         private final Consumer<String> logger;
+        private final Consumer<PacketInfo> packetListener;
 
-        UdpSession(SocketAddress clientAddress, String targetIp, int targetPort, DatagramSocket mainUdpListener, Consumer<String> logger) throws SocketException {
+        UdpSession(SocketAddress clientAddress, String targetIp, int targetPort, DatagramSocket mainUdpListener, Consumer<String> logger, Consumer<PacketInfo> packetListener) throws SocketException {
             this.clientAddress = clientAddress;
             this.mainUdpListener = mainUdpListener;
             this.targetAddress = new InetSocketAddress(targetIp, targetPort);
             this.serverFacingSocket = new DatagramSocket();
             this.lastActivity = System.currentTimeMillis();
             this.logger = logger;
+            this.packetListener = packetListener;
         }
 
         void sendToServer(DatagramPacket clientPacket) throws IOException {
@@ -223,6 +319,8 @@ public class ProxyService {
                     DatagramPacket clientResponse = new DatagramPacket(serverResponse.getData(), serverResponse.getLength(), clientAddress);
                     mainUdpListener.send(clientResponse);
                     logger.accept(String.format("[UDP] Target -> Client(%s): %d bytes", clientAddress, serverResponse.getLength()));
+                    packetListener.accept(new PacketInfo("UDP", "Target -> Client", String.valueOf(clientAddress),
+                            Arrays.copyOf(serverResponse.getData(), serverResponse.getLength())));
                 } catch (IOException e) {
                     if (!serverFacingSocket.isClosed()) {
                         logger.accept("[UDP] Error in session for " + clientAddress + ": " + e.getMessage());

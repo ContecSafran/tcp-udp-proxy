@@ -2,35 +2,42 @@ package com.proxy;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.*;
-import java.util.Map;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.List;
 
 public class ProxyApp extends JFrame {
 
-    private final JTextField localPortField = new JTextField("8080", 5);
+    private static final int MAX_PACKETS = 2000;
+    private static final int CHECKBOX_HIT_WIDTH = 24; // px from the left that toggles the enable checkbox
+
+    private final JTextField localPortField = new JTextField("25000", 5);
     private final JTextField targetIpField = new JTextField("127.0.0.1", 15);
-    private final JTextField targetPortField = new JTextField("80", 5);
+    private final JTextField targetPortField = new JTextField("25001", 5);
     private final JButton startButton = new JButton("Start");
     private final JButton stopButton = new JButton("Stop");
+    private final JButton clearPacketsButton = new JButton("Clear Packets");
     private final JTextArea logArea = new JTextArea();
     private final JLabel tcpConnectionsLabel = new JLabel("TCP Connections: 0");
     private final JLabel udpSessionsLabel = new JLabel("UDP Sessions: 0");
 
-    private ExecutorService executorService;
-    private ScheduledExecutorService scheduledExecutorService;
-    private ServerSocket serverSocket;
-    private DatagramSocket udpListener;
+    // Transform rules (request -> response, individually enabled).
+    private final DefaultListModel<TransformRule> transformListModel = new DefaultListModel<>();
+    private final JList<TransformRule> transformList = new JList<>(transformListModel);
+    private volatile List<TransformRule> transformRulesSnapshot = new ArrayList<>();
 
-    private final Map<SocketAddress, UdpSession> udpSessions = new ConcurrentHashMap<>();
-    private final AtomicInteger activeTcpConnections = new AtomicInteger(0);
+    // Received packets and their (read-only) hex/ASCII inspector.
+    private final DefaultListModel<PacketInfo> packetListModel = new DefaultListModel<>();
+    private final JList<PacketInfo> packetList = new JList<>(packetListModel);
+    private final HexEditor receivedEditor = new HexEditor(false);
+
+    private ProxyService proxyService;
 
     public ProxyApp() {
         setTitle("TCP/UDP Proxy");
-        setSize(600, 400);
+        setSize(1200, 720);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
 
@@ -43,20 +50,152 @@ public class ProxyApp extends JFrame {
         controlPanel.add(targetPortField);
         controlPanel.add(startButton);
         controlPanel.add(stopButton);
+        controlPanel.add(clearPacketsButton);
 
         JPanel statusPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         statusPanel.add(tcpConnectionsLabel);
         statusPanel.add(udpSessionsLabel);
 
+        logArea.setEditable(false);
+
+        transformList.setCellRenderer(new TransformRuleRenderer());
+
+        JSplitPane listsSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
+                buildTransformPanel(),
+                titled("Received Packets", new JScrollPane(packetList)));
+        listsSplit.setResizeWeight(0.5);
+
+        JSplitPane packetSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
+                listsSplit,
+                titled("Received Packet View", receivedEditor));
+        packetSplit.setResizeWeight(0.5);
+
+        JSplitPane mainSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
+                packetSplit,
+                titled("Log", new JScrollPane(logArea)));
+        mainSplit.setResizeWeight(0.6);
+
         add(controlPanel, BorderLayout.NORTH);
-        add(new JScrollPane(logArea), BorderLayout.CENTER);
+        add(mainSplit, BorderLayout.CENTER);
         add(statusPanel, BorderLayout.SOUTH);
 
-        logArea.setEditable(false);
         stopButton.setEnabled(false);
 
         startButton.addActionListener(e -> startProxy());
         stopButton.addActionListener(e -> stopProxy());
+        clearPacketsButton.addActionListener(e -> clearPackets());
+
+        packetList.addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting() && packetList.getSelectedValue() != null) {
+                receivedEditor.setBytes(packetList.getSelectedValue().getData());
+            }
+        });
+
+        transformList.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                int index = transformList.locationToIndex(e.getPoint());
+                if (index < 0) return;
+                Rectangle cell = transformList.getCellBounds(index, index);
+                if (cell == null || !cell.contains(e.getPoint())) return;
+
+                TransformRule rule = transformListModel.get(index);
+                if (e.getX() - cell.x < CHECKBOX_HIT_WIDTH) {
+                    // Clicked the enable checkbox area.
+                    rule.setEnabled(!rule.isEnabled());
+                    refreshRulesSnapshot();
+                    transformList.repaint();
+                } else if (e.getClickCount() == 2) {
+                    editRule(rule);
+                }
+            }
+        });
+    }
+
+    private JPanel buildTransformPanel() {
+        JPanel panel = titled("Transform Rules", new JScrollPane(transformList));
+
+        JButton addButton = new JButton("← 추가");
+        JButton editButton = new JButton("편집");
+        JButton removeButton = new JButton("삭제");
+        addButton.setToolTipText("수신 패킷을 request로 하는 변환 규칙 추가");
+        editButton.setToolTipText("선택한 규칙의 request/response 편집");
+        addButton.addActionListener(e -> addRuleFromSelectedPacket());
+        editButton.addActionListener(e -> {
+            TransformRule rule = transformList.getSelectedValue();
+            if (rule != null) editRule(rule);
+        });
+        removeButton.addActionListener(e -> removeSelectedRule());
+
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        buttons.add(addButton);
+        buttons.add(editButton);
+        buttons.add(removeButton);
+        panel.add(buttons, BorderLayout.SOUTH);
+        return panel;
+    }
+
+    private static JPanel titled(String title, JComponent content) {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(BorderFactory.createTitledBorder(title));
+        panel.add(content, BorderLayout.CENTER);
+        return panel;
+    }
+
+    private void addRuleFromSelectedPacket() {
+        PacketInfo selected = packetList.getSelectedValue();
+        if (selected == null) {
+            JOptionPane.showMessageDialog(this, "수신 패킷 리스트에서 패킷을 선택하세요.");
+            return;
+        }
+        byte[] request = selected.getData().clone();
+        // Seed the response with a copy of the request; the user edits it next.
+        TransformRule rule = new TransformRule(selected.getProtocol(), request, request.clone(), true);
+        transformListModel.addElement(rule);
+        transformList.setSelectedValue(rule, true);
+        refreshRulesSnapshot();
+        editRule(rule);
+    }
+
+    private void editRule(TransformRule rule) {
+        TransformRuleDialog dialog = new TransformRuleDialog(this, rule);
+        if (dialog.showDialog()) {
+            refreshRulesSnapshot();
+            transformList.repaint();
+        }
+    }
+
+    private void removeSelectedRule() {
+        int index = transformList.getSelectedIndex();
+        if (index < 0) return;
+        transformListModel.remove(index);
+        refreshRulesSnapshot();
+    }
+
+    /** Rebuilds the immutable snapshot the network threads read for rule matching. */
+    private void refreshRulesSnapshot() {
+        List<TransformRule> snapshot = new ArrayList<>(transformListModel.size());
+        for (int i = 0; i < transformListModel.size(); i++) {
+            snapshot.add(transformListModel.get(i));
+        }
+        transformRulesSnapshot = snapshot;
+    }
+
+    private void addPacket(PacketInfo packet) {
+        SwingUtilities.invokeLater(() -> {
+            if (packetListModel.size() >= MAX_PACKETS) {
+                packetListModel.remove(0);
+            }
+            packetListModel.addElement(packet);
+            packetList.setSelectedIndex(packetListModel.size() - 1);
+            packetList.ensureIndexIsVisible(packetListModel.size() - 1);
+            receivedEditor.setBytes(packet.getData());
+        });
+    }
+
+    private void clearPackets() {
+        packetListModel.clear();
+        receivedEditor.setBytes(null);
     }
 
     private void startProxy() {
@@ -65,23 +204,17 @@ public class ProxyApp extends JFrame {
             String targetIp = targetIpField.getText();
             int targetPort = Integer.parseInt(targetPortField.getText());
 
-            executorService = Executors.newCachedThreadPool();
-            scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
-
-            // Start TCP Proxy
-            serverSocket = new ServerSocket(localPort);
-            executorService.submit(() -> acceptTcpConnections(targetIp, targetPort));
-
-            // Start UDP Proxy
-            udpListener = new DatagramSocket(localPort);
-            executorService.submit(() -> listenForUdpPackets(targetIp, targetPort));
-
-            // Start UDP session cleanup
-            scheduledExecutorService.scheduleAtFixedRate(this::cleanupUdpSessions, 10, 10, TimeUnit.SECONDS);
+            proxyService = new ProxyService(localPort, targetIp, targetPort,
+                    this::log, this::updateTcpConnectionCount, this::updateUdpSessionCount, this::addPacket);
+            proxyService.setTransformRulesSupplier(() -> transformRulesSnapshot);
+            proxyService.start();
 
             startButton.setEnabled(false);
             stopButton.setEnabled(true);
-            log("Proxy started on port " + localPort);
+            localPortField.setEnabled(false);
+            targetIpField.setEnabled(false);
+            targetPortField.setEnabled(false);
+
         } catch (NumberFormatException ex) {
             log("Error: Invalid port number.");
         } catch (IOException ex) {
@@ -90,139 +223,67 @@ public class ProxyApp extends JFrame {
     }
 
     private void stopProxy() {
-        log("Stopping proxy...");
-        try {
-            if (serverSocket != null && !serverSocket.isClosed()) {
-                serverSocket.close();
-            }
-            if (udpListener != null && !udpListener.isClosed()) {
-                udpListener.close();
-            }
-            if (executorService != null) {
-                executorService.shutdownNow();
-            }
-            if (scheduledExecutorService != null) {
-                scheduledExecutorService.shutdownNow();
-            }
-            udpSessions.values().forEach(UdpSession::close);
-            udpSessions.clear();
-            updateUdpSessionCount();
-            log("Proxy stopped.");
-        } catch (IOException e) {
-            log("Error stopping proxy: " + e.getMessage());
-        } finally {
-            startButton.setEnabled(true);
-            stopButton.setEnabled(false);
+        if (proxyService != null) {
+            proxyService.stop();
+            proxyService = null;
         }
-    }
-
-    private void acceptTcpConnections(String targetIp, int targetPort) {
-        while (!serverSocket.isClosed()) {
-            try {
-                Socket clientSocket = serverSocket.accept();
-                activeTcpConnections.incrementAndGet();
-                updateTcpConnectionCount();
-                log("[TCP] Client connected: " + clientSocket.getRemoteSocketAddress());
-
-                Socket targetSocket = new Socket(targetIp, targetPort);
-
-                executorService.submit(() -> forwardData(clientSocket, targetSocket, "Client -> Target"));
-                executorService.submit(() -> forwardData(targetSocket, clientSocket, "Target -> Client"));
-
-            } catch (IOException e) {
-                if (serverSocket.isClosed()) {
-                    log("TCP listener stopped.");
-                } else {
-                    log("Error accepting TCP connection: " + e.getMessage());
-                }
-            }
-        }
-    }
-
-    private void forwardData(Socket source, Socket destination, String direction) {
-        try (InputStream input = source.getInputStream(); OutputStream output = destination.getOutputStream()) {
-            byte[] buffer = new byte[4096];
-            int read;
-            while ((read = input.read(buffer)) != -1) {
-                output.write(buffer, 0, read);
-                log(String.format("[TCP] %s (%s -> %s): %d bytes", direction, source.getRemoteSocketAddress(), destination.getRemoteSocketAddress(), read));
-            }
-        } catch (IOException e) {
-            // Connection closed or error
-        } finally {
-            try {
-                source.close();
-                destination.close();
-                activeTcpConnections.decrementAndGet();
-                updateTcpConnectionCount();
-            } catch (IOException e) {
-                // Ignore
-            }
-        }
-    }
-
-    private void listenForUdpPackets(String targetIp, int targetPort) {
-        byte[] buffer = new byte[65507];
-        while (!udpListener.isClosed()) {
-            try {
-                DatagramPacket clientPacket = new DatagramPacket(buffer, buffer.length);
-                udpListener.receive(clientPacket);
-                SocketAddress clientAddress = clientPacket.getSocketAddress();
-
-                UdpSession session = udpSessions.computeIfAbsent(clientAddress, addr -> {
-                    try {
-                        UdpSession newSession = new UdpSession(clientAddress, targetIp, targetPort, udpListener);
-                        executorService.submit(newSession);
-                        updateUdpSessionCount();
-                        log("[UDP] New session for " + clientAddress);
-                        return newSession;
-                    } catch (SocketException e) {
-                        log("Error creating UDP session: " + e.getMessage());
-                        return null;
-                    }
-                });
-
-                if (session != null) {
-                    session.sendToServer(clientPacket);
-                    log(String.format("[UDP] Client(%s) -> Target: %d bytes", clientAddress, clientPacket.getLength()));
-                }
-            } catch (IOException e) {
-                if (udpListener.isClosed()) {
-                    log("UDP listener stopped.");
-                } else {
-                    log("Error in UDP listener: " + e.getMessage());
-                }
-            }
-        }
-    }
-
-    private void cleanupUdpSessions() {
-        long now = System.currentTimeMillis();
-        udpSessions.entrySet().removeIf(entry -> {
-            if (now - entry.getValue().getLastActivity() > 60000) {
-                entry.getValue().close();
-                log("[UDP] Session timed out for " + entry.getKey());
-                updateUdpSessionCount();
-                return true;
-            }
-            return false;
-        });
+        startButton.setEnabled(true);
+        stopButton.setEnabled(false);
+        localPortField.setEnabled(true);
+        targetIpField.setEnabled(true);
+        targetPortField.setEnabled(true);
     }
 
     private void log(String message) {
-        System.out.println(message);
-        SwingUtilities.invokeLater(() -> {
+        // Ensure logging is done on the Event Dispatch Thread
+        if (SwingUtilities.isEventDispatchThread()) {
             logArea.append(message + "\n");
             logArea.setCaretPosition(logArea.getDocument().getLength());
-        });
+        } else {
+            SwingUtilities.invokeLater(() -> {
+                logArea.append(message + "\n");
+                logArea.setCaretPosition(logArea.getDocument().getLength());
+            });
+        }
     }
 
     private void updateTcpConnectionCount() {
-        SwingUtilities.invokeLater(() -> tcpConnectionsLabel.setText("TCP Connections: " + activeTcpConnections.get()));
+        SwingUtilities.invokeLater(() -> {
+            if (proxyService != null) {
+                tcpConnectionsLabel.setText("TCP Connections: " + proxyService.getActiveTcpConnections());
+            } else {
+                tcpConnectionsLabel.setText("TCP Connections: 0");
+            }
+        });
     }
 
     private void updateUdpSessionCount() {
-        SwingUtilities.invokeLater(() -> udpSessionsLabel.setText("UDP Sessions: " + udpSessions.size()));
+        SwingUtilities.invokeLater(() -> {
+            if (proxyService != null) {
+                udpSessionsLabel.setText("UDP Sessions: " + proxyService.getActiveUdpSessions());
+            } else {
+                udpSessionsLabel.setText("UDP Sessions: 0");
+            }
+        });
+    }
+
+    /** Renders each transform rule as a checkbox (enable state) plus its summary. */
+    private static class TransformRuleRenderer extends JCheckBox implements ListCellRenderer<TransformRule> {
+        @Override
+        public Component getListCellRendererComponent(JList<? extends TransformRule> list, TransformRule value,
+                                                      int index, boolean isSelected, boolean cellHasFocus) {
+            setText(value.toString());
+            setSelected(value.isEnabled());
+            setOpaque(true);
+            if (isSelected) {
+                setBackground(list.getSelectionBackground());
+                setForeground(list.getSelectionForeground());
+            } else {
+                setBackground(list.getBackground());
+                setForeground(list.getForeground());
+            }
+            return this;
+        }
     }
 
     public static void main(String[] args) {
@@ -230,62 +291,5 @@ public class ProxyApp extends JFrame {
             ProxyApp proxyApp = new ProxyApp();
             proxyApp.setVisible(true);
         });
-    }
-
-    private static class UdpSession implements Runnable {
-        private final DatagramSocket serverFacingSocket;
-        private final SocketAddress clientAddress;
-        private final DatagramSocket mainUdpListener;
-        private final InetSocketAddress targetAddress;
-        private volatile long lastActivity;
-
-        UdpSession(SocketAddress clientAddress, String targetIp, int targetPort, DatagramSocket mainUdpListener) throws SocketException {
-            this.clientAddress = clientAddress;
-            this.mainUdpListener = mainUdpListener;
-            this.targetAddress = new InetSocketAddress(targetIp, targetPort);
-            this.serverFacingSocket = new DatagramSocket();
-            this.lastActivity = System.currentTimeMillis();
-        }
-
-        void sendToServer(DatagramPacket clientPacket) throws IOException {
-            lastActivity = System.currentTimeMillis();
-            DatagramPacket serverPacket = new DatagramPacket(
-                    clientPacket.getData(),
-                    clientPacket.getLength(),
-                    targetAddress
-            );
-            serverFacingSocket.send(serverPacket);
-        }
-
-        @Override
-        public void run() {
-            byte[] buffer = new byte[65507];
-            while (!serverFacingSocket.isClosed()) {
-                try {
-                    DatagramPacket serverResponse = new DatagramPacket(buffer, buffer.length);
-                    serverFacingSocket.receive(serverResponse);
-                    lastActivity = System.currentTimeMillis();
-
-                    DatagramPacket clientResponse = new DatagramPacket(
-                            serverResponse.getData(),
-                            serverResponse.getLength(),
-                            clientAddress
-                    );
-                    mainUdpListener.send(clientResponse);
-                } catch (IOException e) {
-                    if (!serverFacingSocket.isClosed()) {
-                        // Log error
-                    }
-                }
-            }
-        }
-
-        long getLastActivity() {
-            return lastActivity;
-        }
-
-        void close() {
-            serverFacingSocket.close();
-        }
     }
 }

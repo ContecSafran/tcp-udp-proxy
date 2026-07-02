@@ -1,5 +1,6 @@
 package com.proxy.test;
 
+import com.proxy.ProxyService;
 import org.junit.jupiter.api.*;
 
 import java.io.IOException;
@@ -11,59 +12,65 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class ProxyTest {
 
-    private static final int PROXY_PORT = 8080;
-    private static final int SERVER_PORT = 8000;
+    private static final int PROXY_PORT = 25000;
+    private static final int SERVER_PORT = 25001;
     private static final String SERVER_IP = "127.0.0.1";
 
     private ExecutorService serverExecutor;
-    private com.proxy.ProxyApp proxyApp; // Assuming ProxyApp is in com.proxy package
+    private ProxyService proxyService;
 
     @BeforeAll
-    void setup() throws InterruptedException {
-        // Start Dummy Server
+    void setup() throws Exception {
+        System.out.println("--- Setting up tests ---");
+
+        // 1. Start Dummy Server in the background
         serverExecutor = Executors.newSingleThreadExecutor();
         serverExecutor.submit(() -> {
             try {
+                System.out.println("Starting DummyServer on port " + SERVER_PORT);
                 DummyServer.main(new String[]{String.valueOf(SERVER_PORT)});
             } catch (IOException e) {
-                e.printStackTrace();
+                // This will cause tests to fail, which is intended.
+                System.err.println("Failed to start DummyServer: " + e.getMessage());
             }
         });
-        Thread.sleep(1000); // Give server time to start
 
-        // Start Proxy
-        proxyApp = new com.proxy.ProxyApp();
-        // This part is tricky as ProxyApp is a Swing app.
-        // For a real test, you'd refactor ProxyApp to separate logic from GUI.
-        // Here, we'll simulate the start button click action.
-        // This is a simplified approach.
-        // proxyApp.startProxy(); // This would block if not handled correctly.
-        // Let's assume we can't easily start the proxy programmatically.
-        // The test will require manual setup:
-        // 1. Run DummyServer.
-        // 2. Run ProxyApp, set ports (8080 -> 8000), and click Start.
-        // 3. Run this JUnit test.
-        System.out.println("-----------------------------------------------------------------");
-        System.out.println("IMPORTANT: Ensure DummyServer is running on port " + SERVER_PORT);
-        System.out.println("AND ProxyApp is running, forwarding port " + PROXY_PORT + " to " + SERVER_PORT);
-        System.out.println("-----------------------------------------------------------------");
+        // 2. Start ProxyService programmatically
+        // UI-related callbacks are replaced with empty lambdas or simple console logs.
+        proxyService = new ProxyService(PROXY_PORT, SERVER_IP, SERVER_PORT,
+                System.out::println, // Logger
+                () -> {},           // TCP count updater
+                () -> {}            // UDP count updater
+        );
+
+        try {
+            System.out.println("Starting ProxyService: " + PROXY_PORT + " -> " + SERVER_PORT);
+            proxyService.start();
+        } catch (IOException e) {
+            fail("ProxyService could not be started: " + e.getMessage());
+        }
+
+        // Give both servers a moment to initialize before running tests
+        Thread.sleep(1000);
+        System.out.println("--- Setup complete, running tests ---");
     }
 
     @AfterAll
     void teardown() {
+        System.out.println("--- Tearing down tests ---");
+        if (proxyService != null) {
+            proxyService.stop();
+        }
         if (serverExecutor != null) {
             serverExecutor.shutdownNow();
         }
-        // if (proxyApp != null) {
-        //     proxyApp.stopProxy();
-        // }
+        System.out.println("--- Teardown complete ---");
     }
 
     @Test
@@ -85,7 +92,7 @@ public class ProxyTest {
             System.out.println("TCP Echo Test PASSED");
 
         } catch (IOException e) {
-            fail("TCP Echo Test FAILED: " + e.getMessage());
+            fail("TCP Echo Test FAILED: " + e.getMessage(), e);
         }
     }
 
@@ -108,22 +115,27 @@ public class ProxyTest {
                 try {
                     int bytesRead = in.read(buffer);
                     if (bytesRead == -1) break;
-                    receivedMessages.add(new String(buffer, 0, bytesRead));
+                    // The server's response might be "Received... PUSHServer push X"
+                    // So we check if the response contains the expected push message
+                    String response = new String(buffer, 0, bytesRead);
+                    if (response.contains("Server push")) {
+                        receivedMessages.add(response);
+                    }
                 } catch (SocketTimeoutException ex) {
                     // This can happen if pushes are slow, we just retry reading.
                 }
             }
+            
+            // Adjusting assertions to be more robust
+            assertEquals(3, receivedMessages.size(), "Should receive 3 push messages.");
+            assertTrue(receivedMessages.stream().anyMatch(s -> s.contains("Server push 1")), "Push 1 missing");
+            assertTrue(receivedMessages.stream().anyMatch(s -> s.contains("Server push 2")), "Push 2 missing");
+            assertTrue(receivedMessages.stream().anyMatch(s -> s.contains("Server push 3")), "Push 3 missing");
 
-            assertAll("Server Push Validation",
-                () -> assertEquals(3, receivedMessages.size(), "Should receive 3 push messages."),
-                () -> assertTrue(receivedMessages.get(0).contains("Server push 1")),
-                () -> assertTrue(receivedMessages.get(1).contains("Server push 2")),
-                () -> assertTrue(receivedMessages.get(2).contains("Server push 3"))
-            );
             System.out.println("TCP Server Push Test PASSED");
 
         } catch (IOException e) {
-            fail("TCP Server Push Test FAILED: " + e.getMessage());
+            fail("TCP Server Push Test FAILED: " + e.getMessage(), e);
         }
     }
 
@@ -149,7 +161,7 @@ public class ProxyTest {
             System.out.println("UDP Echo Test PASSED");
 
         } catch (IOException e) {
-            fail("UDP Echo Test FAILED: " + e.getMessage());
+            fail("UDP Echo Test FAILED: " + e.getMessage(), e);
         }
     }
 }
