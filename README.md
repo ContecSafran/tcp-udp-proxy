@@ -7,43 +7,11 @@
 
 ### 동작 구성도
 
-```mermaid
-flowchart LR
-    C(["클라이언트<br/>(테스트 대상 프로그램)"])
-
-    subgraph PX["TCP / UDP Proxy — Local Port (TCP + UDP 동시 listen)"]
-        direction TB
-        M{"변환 규칙에<br/>일치하는 요청인가?"}
-        RC["규칙의 response를<br/>프록시가 대신 회신"]
-        RT["Target 응답을<br/>그대로 중계"]
-        LOG["Received Packets · Hex/ASCII · Log<br/>(오가는 모든 패킷 기록)"]
-    end
-
-    T(["Target<br/>실제 장비 · 서버"])
-
-    C -- "요청" --> M
-    M -- "일치 (규칙 ON)" --> RC
-    RC -- "변환된 응답" --> C
-    M -- "불일치 · 규칙 없음" --> T
-    T -- "응답" --> RT
-    RT -- "응답 전달" --> C
-    M -. "기록" .-> LOG
-    RC -. "기록" .-> LOG
-    RT -. "기록" .-> LOG
-
-    classDef hit fill:#dcfce7,stroke:#16a34a,color:#14532d
-    classDef pass fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    classDef mon fill:#f3f4f6,stroke:#9ca3af,color:#374151
-    classDef peer fill:#fff7ed,stroke:#ea580c,color:#7c2d12
-    class RC hit
-    class RT pass
-    class LOG mon
-    class C,T peer
-```
+![동작 구성도](docs/images/architecture.svg)
 
 클라이언트는 Target 대신 **프록시의 Local Port** 로 접속합니다.
 프록시는 들어온 요청이 켜져 있는 변환 규칙과 완전히 일치하면 Target으로 보내지 않고 규칙의 응답을 즉시 돌려주고,
-일치하지 않으면 그대로 Target에 전달한 뒤 그 응답을 클라이언트로 중계합니다. 어느 경로든 오가는 패킷은 모두 기록됩니다.
+일치하지 않으면 그대로 Target에 전달한 뒤 그 응답을 클라이언트로 중계합니다.
 
 ![메인 화면](docs/images/main-window.png)
 

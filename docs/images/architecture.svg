@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="330" viewBox="0 0 860 330" role="img" aria-labelledby="t d">
+  <title id="t">TCP/UDP Proxy 동작 구성도</title>
+  <desc id="d">규칙에 일치하는 요청은 프록시가 변환된 응답을 대신 회신하고, 일치하는 규칙이 없는 요청은 Target으로 전달한 뒤 응답을 중계합니다.</desc>
+
+  <style>
+    .f   { font-family: "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+    .ttl { font-size: 14px; font-weight: 600; fill: #1f2937; }
+    .sub { font-size: 11px; fill: #6b7280; }
+    .lbl { font-size: 12px; fill: #475569; }
+    .chip{ font-size: 12px; font-weight: 700; }
+    .dim { fill: #9ca3af; }
+  </style>
+
+  <defs>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#16a34a"/>
+    </marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+    <filter id="sh" x="-20%" y="-30%" width="140%" height="180%">
+      <feDropShadow dx="0" dy="1.5" stdDeviation="2" flood-color="#0f172a" flood-opacity="0.09"/>
+    </filter>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="859" height="329" rx="14" fill="#fbfcfe" stroke="#e5e9f0"/>
+
+  <!-- ================= lane 1 : rule matched ================= -->
+  <rect x="32" y="30" width="188" height="26" rx="13" fill="#dcfce7"/>
+  <text class="f chip" x="46" y="48" fill="#14532d">① 규칙과 일치하는 요청</text>
+
+  <!-- client -->
+  <rect x="36" y="76" width="140" height="58" rx="10" fill="#ffffff" stroke="#d8dee9" filter="url(#sh)"/>
+  <text class="f ttl" x="106" y="100" text-anchor="middle">클라이언트</text>
+  <text class="f sub" x="106" y="118" text-anchor="middle">테스트 대상</text>
+
+  <!-- proxy -->
+  <rect x="340" y="76" width="180" height="58" rx="10" fill="#f0fdf4" stroke="#86efac" filter="url(#sh)"/>
+  <text class="f ttl" x="430" y="100" text-anchor="middle">TCP / UDP Proxy</text>
+  <text class="f sub" x="430" y="118" text-anchor="middle">Local Port · 변환 규칙 일치</text>
+
+  <!-- target (unused) -->
+  <rect x="684" y="76" width="140" height="58" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-dasharray="4 4"/>
+  <text class="f ttl dim" x="754" y="100" text-anchor="middle">Target</text>
+  <text class="f sub" x="754" y="118" text-anchor="middle">실제 장비 · 서버</text>
+
+  <line x1="182" y1="96" x2="332" y2="96" stroke="#16a34a" stroke-width="1.6" marker-end="url(#ag)"/>
+  <text class="f lbl" x="257" y="87" text-anchor="middle">요청</text>
+
+  <line x1="334" y1="118" x2="184" y2="118" stroke="#16a34a" stroke-width="1.6" marker-end="url(#ag)"/>
+  <text class="f lbl" x="257" y="134" text-anchor="middle" fill="#15803d">변환된 응답</text>
+
+  <line x1="526" y1="112" x2="678" y2="112" stroke="#cbd5e1" stroke-width="1.4" stroke-dasharray="5 5"/>
+  <text class="f sub" x="602" y="100" text-anchor="middle">Target으로 보내지 않음</text>
+
+  <!-- ================= lane 2 : no matching rule ================= -->
+  <rect x="32" y="196" width="214" height="26" rx="13" fill="#dbeafe"/>
+  <text class="f chip" x="46" y="214" fill="#1e3a8a">② 일치하는 규칙이 없는 요청</text>
+
+  <rect x="36" y="240" width="140" height="58" rx="10" fill="#ffffff" stroke="#d8dee9" filter="url(#sh)"/>
+  <text class="f ttl" x="106" y="264" text-anchor="middle">클라이언트</text>
+  <text class="f sub" x="106" y="282" text-anchor="middle">테스트 대상</text>
+
+  <rect x="340" y="240" width="180" height="58" rx="10" fill="#eff6ff" stroke="#93c5fd" filter="url(#sh)"/>
+  <text class="f ttl" x="430" y="264" text-anchor="middle">TCP / UDP Proxy</text>
+  <text class="f sub" x="430" y="282" text-anchor="middle">Local Port · 그대로 중계</text>
+
+  <rect x="684" y="240" width="140" height="58" rx="10" fill="#ffffff" stroke="#d8dee9" filter="url(#sh)"/>
+  <text class="f ttl" x="754" y="264" text-anchor="middle">Target</text>
+  <text class="f sub" x="754" y="282" text-anchor="middle">실제 장비 · 서버</text>
+
+  <line x1="182" y1="260" x2="332" y2="260" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ab)"/>
+  <text class="f lbl" x="257" y="251" text-anchor="middle">요청</text>
+
+  <line x1="526" y1="260" x2="676" y2="260" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ab)"/>
+  <text class="f lbl" x="601" y="251" text-anchor="middle">그대로 전달</text>
+
+  <line x1="678" y1="282" x2="528" y2="282" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ab)"/>
+  <text class="f lbl" x="601" y="298" text-anchor="middle">응답</text>
+
+  <line x1="334" y1="282" x2="184" y2="282" stroke="#2563eb" stroke-width="1.6" marker-end="url(#ab)"/>
+  <text class="f lbl" x="257" y="298" text-anchor="middle" fill="#1d4ed8">응답 중계</text>
+</svg>
