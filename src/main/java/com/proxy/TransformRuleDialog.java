@@ -12,8 +12,8 @@ public class TransformRuleDialog extends JDialog {
 
     private final TransformRule rule;
     private final JTextField nameField = new JTextField();
-    private final HexEditor requestEditor = new HexEditor(true);
-    private final HexEditor responseEditor = new HexEditor(true);
+    private final HexEditor requestEditor = new HexEditor(true, true);
+    private final HexEditor responseEditor = new HexEditor(true, true);
     private final JCheckBox enabledCheck = new JCheckBox("이 규칙 변환 모드 사용");
     private boolean confirmed = false;
 
@@ -25,18 +25,37 @@ public class TransformRuleDialog extends JDialog {
         requestEditor.setBytes(rule.getRequest());
         responseEditor.setBytes(rule.getResponse());
         enabledCheck.setSelected(rule.isEnabled());
+        enabledCheck.setOpaque(false);
+        enabledCheck.setForeground(UiTheme.TEXT);
+        UiTheme.styleField(nameField);
 
-        JPanel namePanel = new JPanel(new BorderLayout(6, 0));
-        namePanel.add(new JLabel("이름:"), BorderLayout.WEST);
-        namePanel.add(nameField, BorderLayout.CENTER);
+        JLabel nameLabel = new JLabel("이름");
+        nameLabel.setFont(UiTheme.SECTION);
+        nameLabel.setForeground(UiTheme.MUTED);
+        JPanel nameInner = new JPanel(new BorderLayout(8, 0));
+        nameInner.setBackground(UiTheme.SURFACE);
+        nameInner.add(nameLabel, BorderLayout.WEST);
+        nameInner.add(nameField, BorderLayout.CENTER);
+        JPanel namePanel = UiTheme.card("Rule Name", nameInner);
 
-        JSplitPane center = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
-                titled("Request (이 요청이 오면)", requestEditor),
-                titled("Response (이 응답을 보냄)", responseEditor));
+        JSplitPane center = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
+                UiTheme.card("Request (이 요청이 오면)", requestEditor),
+                UiTheme.card("Response (이 응답을 보냄)", responseEditor));
+        UiTheme.styleSplit(center);
         center.setResizeWeight(0.5);
+        center.addComponentListener(new java.awt.event.ComponentAdapter() {
+            private boolean done;
+            @Override
+            public void componentResized(java.awt.event.ComponentEvent e) {
+                if (!done && center.getWidth() > 0) {
+                    done = true;
+                    center.setDividerLocation(0.5);
+                }
+            }
+        });
 
-        JButton okButton = new JButton("확인");
-        JButton cancelButton = new JButton("취소");
+        FlatButton okButton = new FlatButton("확인", UiTheme.SUCCESS, UiTheme.SUCCESS_HOVER);
+        FlatButton cancelButton = new FlatButton("취소", UiTheme.NEUTRAL, UiTheme.NEUTRAL_HOVER);
         okButton.addActionListener(e -> onOk());
         cancelButton.addActionListener(e -> {
             confirmed = false;
@@ -44,26 +63,28 @@ public class TransformRuleDialog extends JDialog {
         });
 
         JPanel south = new JPanel(new BorderLayout());
+        south.setBackground(UiTheme.APP_BG);
+        south.setBorder(BorderFactory.createEmptyBorder(8, 12, 10, 12));
         south.add(enabledCheck, BorderLayout.WEST);
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        buttons.setOpaque(false);
         buttons.add(okButton);
         buttons.add(cancelButton);
         south.add(buttons, BorderLayout.EAST);
 
+        JPanel content = new JPanel(new BorderLayout(0, 8));
+        content.setBackground(UiTheme.APP_BG);
+        content.setBorder(BorderFactory.createEmptyBorder(12, 12, 0, 12));
+        content.add(namePanel, BorderLayout.NORTH);
+        content.add(center, BorderLayout.CENTER);
+
         setLayout(new BorderLayout());
-        add(namePanel, BorderLayout.NORTH);
-        add(center, BorderLayout.CENTER);
+        getContentPane().setBackground(UiTheme.APP_BG);
+        add(content, BorderLayout.CENTER);
         add(south, BorderLayout.SOUTH);
 
-        setSize(760, 560);
+        setSize(1300, 640);
         setLocationRelativeTo(owner);
-    }
-
-    private static JComponent titled(String title, JComponent content) {
-        JPanel panel = new JPanel(new BorderLayout());
-        panel.setBorder(BorderFactory.createTitledBorder(title));
-        panel.add(content, BorderLayout.CENTER);
-        return panel;
     }
 
     private void onOk() {

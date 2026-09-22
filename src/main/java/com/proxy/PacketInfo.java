@@ -32,6 +32,24 @@ public class PacketInfo {
         return protocol;
     }
 
+    public String getDirection() {
+        return direction;
+    }
+
+    public String getRemoteAddress() {
+        return remoteAddress;
+    }
+
+    /** True for traffic the client receives: a target reply or a transform reply. */
+    public boolean isToClient() {
+        return direction.startsWith("Target -> Client") || direction.startsWith("Proxy -> Client");
+    }
+
+    /** True for a request travelling from the client towards the target. */
+    public boolean isFromClient() {
+        return direction.startsWith("Client -> Target");
+    }
+
     public byte[] getData() {
         return data;
     }

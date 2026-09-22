@@ -23,21 +23,53 @@ public class HexEditor extends JPanel {
     private String lastRenderedAscii = "";
 
     public HexEditor(boolean editable) {
+        this(editable, false);
+    }
+
+    /**
+     * @param editable whether the hex/ASCII views can be edited
+     * @param vertical true to stack Hex above ASCII, false for side-by-side
+     */
+    public HexEditor(boolean editable, boolean vertical) {
         super(new BorderLayout());
+        setBackground(UiTheme.SURFACE);
 
         hexArea.setEditable(editable);
-        hexArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         asciiArea.setEditable(editable);
-        asciiArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        UiTheme.styleArea(hexArea, UiTheme.HEX_BG, UiTheme.HEX_FG, true);
+        UiTheme.styleArea(asciiArea, UiTheme.HEX_BG, UiTheme.HEX_FG, true);
+
+        JScrollPane hexScroll = UiTheme.scroll(hexArea);
+        JScrollPane asciiScroll = UiTheme.scroll(asciiArea);
+        // Equal small preferred widths so the split honours resizeWeight instead of
+        // letting the wide hex dump push the ASCII column to almost nothing.
+        hexScroll.setPreferredSize(new Dimension(10, 10));
+        asciiScroll.setPreferredSize(new Dimension(10, 10));
 
         JPanel hexPanel = new JPanel(new BorderLayout());
-        hexPanel.add(new JScrollPane(hexArea), BorderLayout.CENTER);
+        hexPanel.setBackground(UiTheme.SURFACE);
+        hexPanel.add(hexScroll, BorderLayout.CENTER);
         hexPanel.add(hexUtilPanel, BorderLayout.SOUTH);
 
-        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
+        int orientation = vertical ? JSplitPane.VERTICAL_SPLIT : JSplitPane.HORIZONTAL_SPLIT;
+        JSplitPane split = new JSplitPane(orientation,
                 withTitle("Hex", hexPanel),
-                withTitle("ASCII", new JScrollPane(asciiArea)));
-        split.setResizeWeight(0.6);
+                withTitle("ASCII", asciiScroll));
+        UiTheme.styleSplit(split);
+        split.setResizeWeight(0.5);
+        // The wide converter bar under the hex view inflates the hex side's
+        // preferred size; pin the divider to 50% once the split has a real size.
+        split.addComponentListener(new java.awt.event.ComponentAdapter() {
+            private boolean done;
+            @Override
+            public void componentResized(java.awt.event.ComponentEvent e) {
+                int extent = vertical ? split.getHeight() : split.getWidth();
+                if (!done && extent > 0) {
+                    done = true;
+                    split.setDividerLocation(0.5);
+                }
+            }
+        });
         add(split, BorderLayout.CENTER);
 
         if (editable) {
@@ -57,8 +89,14 @@ public class HexEditor extends JPanel {
     }
 
     private static JComponent withTitle(String title, JComponent content) {
-        JPanel panel = new JPanel(new BorderLayout());
-        panel.setBorder(BorderFactory.createTitledBorder(title));
+        JLabel header = new JLabel(title.toUpperCase());
+        header.setFont(UiTheme.SECTION);
+        header.setForeground(UiTheme.MUTED);
+        header.setBorder(BorderFactory.createEmptyBorder(0, 2, 4, 0));
+
+        JPanel panel = new JPanel(new BorderLayout(0, 4));
+        panel.setBackground(UiTheme.SURFACE);
+        panel.add(header, BorderLayout.NORTH);
         panel.add(content, BorderLayout.CENTER);
         return panel;
     }

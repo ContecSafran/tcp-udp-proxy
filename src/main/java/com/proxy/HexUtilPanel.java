@@ -40,19 +40,24 @@ public class HexUtilPanel extends JPanel {
     private final JLabel checksumInfoLabel = new JLabel("Hex 뷰에서 범위를 선택하세요.");
 
     public HexUtilPanel(JTextArea hexArea) {
-        super(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        super(new FlowLayout(FlowLayout.LEFT, 6, 4));
         this.hexArea = hexArea;
+        setBackground(UiTheme.SURFACE);
+        setBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0));
 
         JComboBox<String> toolSelector = new JComboBox<>(new String[]{"데이터 변환기", "CheckSum 계산기"});
         CardLayout cardLayout = new CardLayout();
         JPanel cards = new JPanel(cardLayout);
+        cards.setBackground(UiTheme.SURFACE);
 
-        JPanel converterCard = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        JPanel converterCard = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        converterCard.setBackground(UiTheme.SURFACE);
         converterCard.add(endianCombo);
         converterCard.add(dataTypeCombo);
         converterCard.add(valueField);
 
-        JPanel checksumCard = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        JPanel checksumCard = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        checksumCard.setBackground(UiTheme.SURFACE);
         checksumCard.add(checksumMethodCombo);
         checksumCard.add(checksumField);
         checksumCard.add(checksumInfoLabel);
@@ -66,6 +71,12 @@ public class HexUtilPanel extends JPanel {
         dataTypeCombo.setSelectedIndex(7); // Int32
         valueField.setEditable(false);
         checksumField.setEditable(false);
+        UiTheme.styleField(valueField);
+        UiTheme.styleField(checksumField);
+        checksumInfoLabel.setForeground(UiTheme.MUTED);
+        for (JComboBox<String> combo : new JComboBox[]{toolSelector, endianCombo, dataTypeCombo, checksumMethodCombo}) {
+            combo.setBackground(UiTheme.SURFACE);
+        }
 
         toolSelector.addActionListener(e ->
                 cardLayout.show(cards, toolSelector.getSelectedIndex() == 0 ? "converter" : "checksum"));

@@ -8,6 +8,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -25,6 +26,8 @@ public class ProxyService {
     private DatagramSocket udpListener;
 
     private final Map<SocketAddress, UdpSession> udpSessions = new ConcurrentHashMap<>();
+    /** Live TCP sockets (client and target side) so {@link #stop()} can close them. */
+    private final Set<Socket> activeSockets = ConcurrentHashMap.newKeySet();
     private final AtomicInteger activeTcpConnections = new AtomicInteger(0);
 
     // Callbacks for logging and UI updates
@@ -67,8 +70,8 @@ public class ProxyService {
     }
 
     public void start() throws IOException, BindException {
-        executorService = Executors.newCachedThreadPool();
-        scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
+        executorService = Executors.newCachedThreadPool(ProxyService::worker);
+        scheduledExecutorService = Executors.newSingleThreadScheduledExecutor(ProxyService::worker);
 
         // Start TCP Proxy
         serverSocket = new ServerSocket(localPort);
@@ -84,25 +87,40 @@ public class ProxyService {
         logger.accept("Proxy service started on port " + localPort + " -> " + targetIp + ":" + targetPort);
     }
 
+    /** Worker threads are daemons so a leftover one can never keep the JVM alive. */
+    private static Thread worker(Runnable runnable) {
+        Thread thread = new Thread(runnable, "proxy-worker");
+        thread.setDaemon(true);
+        return thread;
+    }
+
     public void stop() {
         logger.accept("Stopping proxy service...");
-        try {
-            if (serverSocket != null && !serverSocket.isClosed()) serverSocket.close();
-            if (udpListener != null && !udpListener.isClosed()) udpListener.close();
 
-            if (executorService != null) executorService.shutdownNow();
-            if (scheduledExecutorService != null) scheduledExecutorService.shutdownNow();
+        // Stop accepting new traffic first.
+        closeQuietly(serverSocket);
+        closeQuietly(udpListener);
 
-            udpSessions.values().forEach(UdpSession::close);
-            udpSessions.clear();
-            activeTcpConnections.set(0);
-
-            tcpCountUpdater.run();
-            udpCountUpdater.run();
-            logger.accept("Proxy service stopped.");
-        } catch (IOException e) {
-            logger.accept("Error stopping proxy service: " + e.getMessage());
+        // Then close every live connection. This is what actually releases the
+        // sockets: the reader threads sit in a blocking InputStream.read(), which
+        // does not react to Thread.interrupt(), so shutdownNow() on its own would
+        // leave both the threads and the connections alive.
+        int closed = activeSockets.size();
+        for (Socket socket : activeSockets) {
+            closeQuietly(socket);
         }
+        activeSockets.clear();
+
+        udpSessions.values().forEach(UdpSession::close);
+        udpSessions.clear();
+
+        if (executorService != null) executorService.shutdownNow();
+        if (scheduledExecutorService != null) scheduledExecutorService.shutdownNow();
+
+        activeTcpConnections.set(0);
+        tcpCountUpdater.run();
+        udpCountUpdater.run();
+        logger.accept("Proxy service stopped. (closed " + closed + " open socket(s))");
     }
 
     public int getActiveTcpConnections() {
@@ -129,6 +147,7 @@ public class ProxyService {
 
     private void handleNewTcpConnection(Socket clientSocket, String targetIp, int targetPort) {
         activeTcpConnections.incrementAndGet();
+        activeSockets.add(clientSocket);
         tcpCountUpdater.run();
         logger.accept("[TCP] Client connected: " + clientSocket.getRemoteSocketAddress());
 
@@ -143,6 +162,7 @@ public class ProxyService {
 
         final Socket target = targetSocket;
         if (target != null) {
+            activeSockets.add(target);
             executorService.submit(() -> pumpTargetToClient(target, clientSocket));
         }
         // The client-reading task owns the connection lifecycle (and the counter).
@@ -187,7 +207,9 @@ public class ProxyService {
         } finally {
             closeQuietly(clientSocket);
             closeQuietly(targetSocket);
-            activeTcpConnections.decrementAndGet();
+            // Clamped: stop() zeroes the counter, so a connection torn down by it
+            // must not push the count negative.
+            activeTcpConnections.updateAndGet(count -> Math.max(0, count - 1));
             tcpCountUpdater.run();
             logger.accept("[TCP] Connection closed: " + remote);
         }
@@ -215,11 +237,30 @@ public class ProxyService {
         }
     }
 
-    private static void closeQuietly(Socket socket) {
-        if (socket != null && !socket.isClosed()) {
+    /** Closes a TCP socket and drops it from the live-socket set. */
+    private void closeQuietly(Socket socket) {
+        if (socket == null) return;
+        activeSockets.remove(socket);
+        if (!socket.isClosed()) {
             try {
                 socket.close();
             } catch (IOException e) { /* ignore */ }
+        }
+    }
+
+    private void closeQuietly(ServerSocket socket) {
+        if (socket != null && !socket.isClosed()) {
+            try {
+                socket.close();
+            } catch (IOException e) {
+                logger.accept("Error closing TCP listener: " + e.getMessage());
+            }
+        }
+    }
+
+    private static void closeQuietly(DatagramSocket socket) {
+        if (socket != null && !socket.isClosed()) {
+            socket.close(); // DatagramSocket.close() does not throw
         }
     }
 

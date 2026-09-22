@@ -4,328 +4,291 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import java.io.IOException;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
+/**
+ * Main window: hosts one {@link ProxyPanel} (= one project, one proxy) per tab.
+ * The trailing "+" tab opens a new, unsaved project tab, and the set of open
+ * projects is remembered so they are restored on the next start.
+ */
 public class ProxyApp extends JFrame {
 
-    private static final int MAX_PACKETS = 2000;
-    private static final int CHECKBOX_HIT_WIDTH = 24; // px from the left that toggles the enable checkbox
-
-    private final JTextField localPortField = new JTextField("25000", 5);
-    private final JTextField targetIpField = new JTextField("127.0.0.1", 15);
-    private final JTextField targetPortField = new JTextField("25001", 5);
-    private final JButton startButton = new JButton("Start");
-    private final JButton stopButton = new JButton("Stop");
-    private final JButton clearPacketsButton = new JButton("Clear Packets");
-    private final JButton saveConfigButton = new JButton("Save Config");
-    private final JTextArea logArea = new JTextArea();
-    private final JLabel tcpConnectionsLabel = new JLabel("TCP Connections: 0");
-    private final JLabel udpSessionsLabel = new JLabel("UDP Sessions: 0");
-
-    // Transform rules (request -> response, individually enabled).
-    private final DefaultListModel<TransformRule> transformListModel = new DefaultListModel<>();
-    private final JList<TransformRule> transformList = new JList<>(transformListModel);
-    private volatile List<TransformRule> transformRulesSnapshot = new ArrayList<>();
-
-    // Received packets and their (read-only) hex/ASCII inspector.
-    private final DefaultListModel<PacketInfo> packetListModel = new DefaultListModel<>();
-    private final JList<PacketInfo> packetList = new JList<>(packetListModel);
-    private final HexEditor receivedEditor = new HexEditor(false);
-
-    private ProxyService proxyService;
+    private final JTabbedPane tabs = new JTabbedPane();
+    /** Suppresses the "+"-tab handler while tabs are added/removed in code. */
+    private boolean adjustingTabs;
 
     public ProxyApp() {
         setTitle("TCP/UDP Proxy");
-        setSize(1200, 720);
+        setSize(1540, 800);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
+        getContentPane().setBackground(UiTheme.APP_BG);
 
-        JPanel controlPanel = new JPanel(new FlowLayout());
-        controlPanel.add(new JLabel("Local Port:"));
-        controlPanel.add(localPortField);
-        controlPanel.add(new JLabel("Target IP:"));
-        controlPanel.add(targetIpField);
-        controlPanel.add(new JLabel("Target Port:"));
-        controlPanel.add(targetPortField);
-        controlPanel.add(startButton);
-        controlPanel.add(stopButton);
-        controlPanel.add(clearPacketsButton);
-        controlPanel.add(saveConfigButton);
+        add(buildHeaderBar(), BorderLayout.NORTH);
 
-        JPanel statusPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        statusPanel.add(tcpConnectionsLabel);
-        statusPanel.add(udpSessionsLabel);
+        tabs.setFont(UiTheme.BASE);
+        tabs.setBackground(UiTheme.APP_BG);
+        tabs.setBorder(BorderFactory.createEmptyBorder(6, 4, 0, 4));
+        add(tabs, BorderLayout.CENTER);
 
-        logArea.setEditable(false);
+        adjustingTabs = true;
+        addPlusTab();
+        for (String name : initialProjects()) {
+            insertProjectTab(name);
+        }
+        if (tabs.getTabCount() == 1) { // only the "+" tab — no stored projects
+            insertProjectTab(ProjectStore.DEFAULT_PROJECT);
+        }
+        adjustingTabs = false;
+        tabs.setSelectedIndex(0);
 
-        transformList.setCellRenderer(new TransformRuleRenderer());
-
-        JSplitPane listsSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
-                buildTransformPanel(),
-                titled("Received Packets", new JScrollPane(packetList)));
-        listsSplit.setResizeWeight(0.5);
-
-        JSplitPane packetSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
-                listsSplit,
-                titled("Received Packet View", receivedEditor));
-        packetSplit.setResizeWeight(0.5);
-
-        JSplitPane mainSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
-                packetSplit,
-                titled("Log", new JScrollPane(logArea)));
-        mainSplit.setResizeWeight(0.6);
-
-        add(controlPanel, BorderLayout.NORTH);
-        add(mainSplit, BorderLayout.CENTER);
-        add(statusPanel, BorderLayout.SOUTH);
-
-        stopButton.setEnabled(false);
-
-        startButton.addActionListener(e -> startProxy());
-        stopButton.addActionListener(e -> stopProxy());
-        clearPacketsButton.addActionListener(e -> clearPackets());
-        saveConfigButton.addActionListener(e -> saveConfig());
-
-        packetList.addListSelectionListener(e -> {
-            if (!e.getValueIsAdjusting() && packetList.getSelectedValue() != null) {
-                receivedEditor.setBytes(packetList.getSelectedValue().getData());
+        tabs.addChangeListener(e -> {
+            if (!adjustingTabs && tabs.getSelectedIndex() == plusTabIndex()) {
+                // Clicking the "+" tab creates a fresh, unsaved project tab.
+                SwingUtilities.invokeLater(() -> addNewTab(null));
             }
         });
 
-        transformList.addMouseListener(new MouseAdapter() {
+        addWindowListener(new WindowAdapter() {
             @Override
-            public void mouseClicked(MouseEvent e) {
-                int index = transformList.locationToIndex(e.getPoint());
-                if (index < 0) return;
-                Rectangle cell = transformList.getCellBounds(index, index);
-                if (cell == null || !cell.contains(e.getPoint())) return;
-
-                TransformRule rule = transformListModel.get(index);
-                if (e.getX() - cell.x < CHECKBOX_HIT_WIDTH) {
-                    // Clicked the enable checkbox area.
-                    rule.setEnabled(!rule.isEnabled());
-                    refreshRulesSnapshot();
-                    transformList.repaint();
-                } else if (e.getClickCount() == 2) {
-                    editRule(rule);
+            public void windowClosing(WindowEvent e) {
+                for (ProxyPanel panel : panels()) {
+                    panel.shutdown();
                 }
             }
         });
-
-        loadConfig();
     }
 
-    private void loadConfig() {
-        try {
-            ProxyConfig config = ProxyConfig.load();
-            localPortField.setText(config.localPort);
-            targetIpField.setText(config.targetIp);
-            targetPortField.setText(config.targetPort);
-            transformListModel.clear();
-            for (TransformRule rule : config.rules) {
-                transformListModel.addElement(rule);
+    // ------------------------------------------------------------------ layout
+
+    private JComponent buildHeaderBar() {
+        JPanel bar = new JPanel(new BorderLayout());
+        bar.setBackground(UiTheme.HEADER_BG);
+        bar.setBorder(BorderFactory.createEmptyBorder(12, 18, 12, 18));
+
+        JLabel title = new JLabel("TCP / UDP  Proxy");
+        title.setFont(UiTheme.TITLE);
+        title.setForeground(UiTheme.HEADER_FG);
+        bar.add(title, BorderLayout.WEST);
+        return bar;
+    }
+
+    // ------------------------------------------------------------------ tabs
+
+    /** Projects to open at startup: stored open list, filtered to unique names. */
+    private List<String> initialProjects() {
+        Set<String> unique = new LinkedHashSet<>();
+        for (String name : ProjectStore.openProjects()) {
+            unique.add(ProjectStore.sanitize(name));
+        }
+        return new ArrayList<>(unique);
+    }
+
+    private int plusTabIndex() {
+        return tabs.getTabCount() - 1;
+    }
+
+    /** The dummy trailing tab that acts as a "new tab" button. */
+    private void addPlusTab() {
+        JPanel placeholder = new JPanel();
+        placeholder.setBackground(UiTheme.APP_BG);
+        tabs.addTab("+", placeholder);
+
+        JLabel plus = new JLabel("  +  ");
+        plus.setFont(UiTheme.BOLD);
+        plus.setForeground(UiTheme.MUTED);
+        plus.setToolTipText("새 프로젝트 탭");
+        plus.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                addNewTab(null);
             }
-            refreshRulesSnapshot();
-        } catch (IOException ex) {
-            log("Error loading config: " + ex.getMessage());
-        }
-    }
 
-    private void saveConfig() {
-        ProxyConfig config = new ProxyConfig();
-        config.localPort = localPortField.getText();
-        config.targetIp = targetIpField.getText();
-        config.targetPort = targetPortField.getText();
-        for (int i = 0; i < transformListModel.size(); i++) {
-            config.rules.add(transformListModel.get(i));
-        }
-        try {
-            config.save();
-            log("Config saved to " + ProxyConfig.configFile().getAbsolutePath());
-        } catch (IOException ex) {
-            log("Error saving config: " + ex.getMessage());
-        }
-    }
+            @Override
+            public void mouseEntered(MouseEvent e) {
+                plus.setForeground(UiTheme.ACCENT);
+            }
 
-    private JPanel buildTransformPanel() {
-        JPanel panel = titled("Transform Rules", new JScrollPane(transformList));
-
-        JButton addButton = new JButton("← 추가");
-        JButton editButton = new JButton("편집");
-        JButton removeButton = new JButton("삭제");
-        addButton.setToolTipText("수신 패킷을 request로 하는 변환 규칙 추가");
-        editButton.setToolTipText("선택한 규칙의 request/response 편집");
-        addButton.addActionListener(e -> addRuleFromSelectedPacket());
-        editButton.addActionListener(e -> {
-            TransformRule rule = transformList.getSelectedValue();
-            if (rule != null) editRule(rule);
+            @Override
+            public void mouseExited(MouseEvent e) {
+                plus.setForeground(UiTheme.MUTED);
+            }
         });
-        removeButton.addActionListener(e -> removeSelectedRule());
+        tabs.setTabComponentAt(tabs.getTabCount() - 1, plus);
+    }
 
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
-        buttons.add(addButton);
-        buttons.add(editButton);
-        buttons.add(removeButton);
-        panel.add(buttons, BorderLayout.SOUTH);
+    /** Inserts a project tab just before the "+" tab (no selection change). */
+    private ProxyPanel insertProjectTab(String projectName) {
+        ProxyPanel panel = new ProxyPanel(this, projectName);
+        int index = plusTabIndex();
+        tabs.insertTab(panel.displayName(), null, panel, null, index);
+        tabs.setTabComponentAt(index, new TabHeader(panel));
         return panel;
     }
 
-    private static JPanel titled(String title, JComponent content) {
-        JPanel panel = new JPanel(new BorderLayout());
-        panel.setBorder(BorderFactory.createTitledBorder(title));
-        panel.add(content, BorderLayout.CENTER);
-        return panel;
+    /** Adds a tab and selects it; {@code projectName} may be null for a new blank tab. */
+    private void addNewTab(String projectName) {
+        adjustingTabs = true;
+        ProxyPanel panel = insertProjectTab(projectName);
+        adjustingTabs = false;
+        tabs.setSelectedComponent(panel);
+        syncOpenProjects();
     }
 
-    private void addRuleFromSelectedPacket() {
-        PacketInfo selected = packetList.getSelectedValue();
-        if (selected == null) {
-            JOptionPane.showMessageDialog(this, "수신 패킷 리스트에서 패킷을 선택하세요.");
+    /** Closes a tab, stopping its proxy first (with confirmation while running). */
+    private void closeTab(ProxyPanel panel) {
+        if (panel.isRunning()
+                && JOptionPane.showConfirmDialog(this,
+                    "'" + panel.displayName() + "' 프록시가 실행 중입니다. 중지하고 탭을 닫을까요?",
+                    "탭 닫기", JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) {
             return;
         }
-        byte[] request = selected.getData().clone();
-        // Seed the response with a copy of the request; the user edits it next.
-        String defaultName = "Rule " + (transformListModel.size() + 1);
-        TransformRule rule = new TransformRule(defaultName, selected.getProtocol(), request, request.clone(), true);
-        transformListModel.addElement(rule);
-        transformList.setSelectedValue(rule, true);
-        refreshRulesSnapshot();
-        editRule(rule);
-    }
-
-    private void editRule(TransformRule rule) {
-        TransformRuleDialog dialog = new TransformRuleDialog(this, rule);
-        if (dialog.showDialog()) {
-            refreshRulesSnapshot();
-            transformList.repaint();
+        panel.shutdown();
+        adjustingTabs = true;
+        tabs.remove(panel);
+        // Never leave the "+" tab selected or as the only tab.
+        if (tabs.getTabCount() == 1) {
+            insertProjectTab(null);
         }
-    }
-
-    private void removeSelectedRule() {
-        int index = transformList.getSelectedIndex();
-        if (index < 0) return;
-        transformListModel.remove(index);
-        refreshRulesSnapshot();
-    }
-
-    /** Rebuilds the immutable snapshot the network threads read for rule matching. */
-    private void refreshRulesSnapshot() {
-        List<TransformRule> snapshot = new ArrayList<>(transformListModel.size());
-        for (int i = 0; i < transformListModel.size(); i++) {
-            snapshot.add(transformListModel.get(i));
+        if (tabs.getSelectedIndex() == plusTabIndex()) {
+            tabs.setSelectedIndex(plusTabIndex() - 1);
         }
-        transformRulesSnapshot = snapshot;
+        adjustingTabs = false;
+        syncOpenProjects();
     }
 
-    private void addPacket(PacketInfo packet) {
-        SwingUtilities.invokeLater(() -> {
-            if (packetListModel.size() >= MAX_PACKETS) {
-                packetListModel.remove(0);
+    private List<ProxyPanel> panels() {
+        List<ProxyPanel> list = new ArrayList<>();
+        for (int i = 0; i < tabs.getTabCount(); i++) {
+            Component c = tabs.getComponentAt(i);
+            if (c instanceof ProxyPanel) {
+                list.add((ProxyPanel) c);
             }
-            packetListModel.addElement(packet);
-            packetList.setSelectedIndex(packetListModel.size() - 1);
-            packetList.ensureIndexIsVisible(packetListModel.size() - 1);
-            receivedEditor.setBytes(packet.getData());
-        });
-    }
-
-    private void clearPackets() {
-        packetListModel.clear();
-        receivedEditor.setBytes(null);
-    }
-
-    private void startProxy() {
-        try {
-            int localPort = Integer.parseInt(localPortField.getText());
-            String targetIp = targetIpField.getText();
-            int targetPort = Integer.parseInt(targetPortField.getText());
-
-            proxyService = new ProxyService(localPort, targetIp, targetPort,
-                    this::log, this::updateTcpConnectionCount, this::updateUdpSessionCount, this::addPacket);
-            proxyService.setTransformRulesSupplier(() -> transformRulesSnapshot);
-            proxyService.start();
-
-            startButton.setEnabled(false);
-            stopButton.setEnabled(true);
-            localPortField.setEnabled(false);
-            targetIpField.setEnabled(false);
-            targetPortField.setEnabled(false);
-
-        } catch (NumberFormatException ex) {
-            log("Error: Invalid port number.");
-        } catch (IOException ex) {
-            log("Error starting proxy: " + ex.getMessage());
         }
+        return list;
     }
 
-    private void stopProxy() {
-        if (proxyService != null) {
-            proxyService.stop();
-            proxyService = null;
+    /** Persists the ordered list of saved projects currently open as tabs. */
+    private void syncOpenProjects() {
+        List<String> names = new ArrayList<>();
+        for (ProxyPanel panel : panels()) {
+            if (panel.getProjectName() != null) {
+                names.add(panel.getProjectName());
+            }
         }
-        startButton.setEnabled(true);
-        stopButton.setEnabled(false);
-        localPortField.setEnabled(true);
-        targetIpField.setEnabled(true);
-        targetPortField.setEnabled(true);
+        ProjectStore.setOpenProjects(names);
     }
 
-    private void log(String message) {
-        // Ensure logging is done on the Event Dispatch Thread
-        if (SwingUtilities.isEventDispatchThread()) {
-            logArea.append(message + "\n");
-            logArea.setCaretPosition(logArea.getDocument().getLength());
-        } else {
-            SwingUtilities.invokeLater(() -> {
-                logArea.append(message + "\n");
-                logArea.setCaretPosition(logArea.getDocument().getLength());
+    // ------------------------------------------------------ ProxyPanel callbacks
+
+    /** Called by a panel when its project name or running state changed. */
+    void panelStateChanged(ProxyPanel panel) {
+        int index = tabs.indexOfComponent(panel);
+        if (index >= 0) {
+            Component header = tabs.getTabComponentAt(index);
+            if (header instanceof TabHeader) {
+                ((TabHeader) header).refresh();
+            }
+        }
+        syncOpenProjects();
+    }
+
+    /** True if another tab (not {@code caller}) already holds {@code name}. */
+    boolean isProjectOpenElsewhere(ProxyPanel caller, String name) {
+        for (ProxyPanel panel : panels()) {
+            if (panel != caller && name.equals(panel.getProjectName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Switches to the tab holding {@code name}, if any; returns whether it did. */
+    boolean focusProjectTab(ProxyPanel caller, String name) {
+        for (ProxyPanel panel : panels()) {
+            if (panel != caller && name.equals(panel.getProjectName())) {
+                tabs.setSelectedComponent(panel);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------------ tab header
+
+    /** Tab title: running indicator + project name + close button. */
+    private class TabHeader extends JPanel {
+
+        private final ProxyPanel panel;
+        private final JLabel dot = new JLabel("●");
+        private final JLabel title = new JLabel();
+
+        TabHeader(ProxyPanel panel) {
+            super(new FlowLayout(FlowLayout.LEFT, 4, 0));
+            this.panel = panel;
+            setOpaque(false);
+
+            dot.setFont(UiTheme.BASE);
+            title.setFont(UiTheme.BASE);
+            title.setForeground(UiTheme.TEXT);
+
+            JLabel close = new JLabel(" × ");
+            close.setFont(UiTheme.BOLD);
+            close.setForeground(UiTheme.MUTED);
+            close.setToolTipText("탭 닫기");
+            close.addMouseListener(new MouseAdapter() {
+                @Override
+                public void mouseClicked(MouseEvent e) {
+                    closeTab(panel);
+                }
+
+                @Override
+                public void mouseEntered(MouseEvent e) {
+                    close.setForeground(UiTheme.DANGER);
+                }
+
+                @Override
+                public void mouseExited(MouseEvent e) {
+                    close.setForeground(UiTheme.MUTED);
+                }
             });
+
+            // A custom tab component swallows clicks, so forward them to select the tab.
+            MouseAdapter select = new MouseAdapter() {
+                @Override
+                public void mousePressed(MouseEvent e) {
+                    int index = tabs.indexOfComponent(panel);
+                    if (index >= 0) {
+                        tabs.setSelectedIndex(index);
+                    }
+                }
+            };
+            addMouseListener(select);
+            title.addMouseListener(select);
+            dot.addMouseListener(select);
+
+            add(dot);
+            add(title);
+            add(close);
+            refresh();
         }
-    }
 
-    private void updateTcpConnectionCount() {
-        SwingUtilities.invokeLater(() -> {
-            if (proxyService != null) {
-                tcpConnectionsLabel.setText("TCP Connections: " + proxyService.getActiveTcpConnections());
-            } else {
-                tcpConnectionsLabel.setText("TCP Connections: 0");
-            }
-        });
-    }
-
-    private void updateUdpSessionCount() {
-        SwingUtilities.invokeLater(() -> {
-            if (proxyService != null) {
-                udpSessionsLabel.setText("UDP Sessions: " + proxyService.getActiveUdpSessions());
-            } else {
-                udpSessionsLabel.setText("UDP Sessions: 0");
-            }
-        });
-    }
-
-    /** Renders each transform rule as a checkbox (enable state) plus its summary. */
-    private static class TransformRuleRenderer extends JCheckBox implements ListCellRenderer<TransformRule> {
-        @Override
-        public Component getListCellRendererComponent(JList<? extends TransformRule> list, TransformRule value,
-                                                      int index, boolean isSelected, boolean cellHasFocus) {
-            setText(value.toString());
-            setSelected(value.isEnabled());
-            setOpaque(true);
-            if (isSelected) {
-                setBackground(list.getSelectionBackground());
-                setForeground(list.getSelectionForeground());
-            } else {
-                setBackground(list.getBackground());
-                setForeground(list.getForeground());
-            }
-            return this;
+        void refresh() {
+            dot.setForeground(panel.isRunning() ? UiTheme.SUCCESS : UiTheme.BORDER);
+            title.setText(panel.displayName());
+            revalidate();
+            repaint();
         }
     }
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
+            UiTheme.installDefaults();
             ProxyApp proxyApp = new ProxyApp();
             proxyApp.setVisible(true);
         });

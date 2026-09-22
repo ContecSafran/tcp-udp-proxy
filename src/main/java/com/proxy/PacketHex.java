@@ -43,13 +43,18 @@ public final class PacketHex {
     }
 
     /**
-     * Parses an edited hex dump back into bytes. The leading offset column of
-     * each line is dropped, then every remaining hex-digit pair is collected.
+     * Parses an edited hex dump back into bytes. Text laid out by
+     * {@link #formatHex} has its offset column dropped; text typed by hand
+     * (plain hex, with or without spaces or line breaks) is taken as-is, so a
+     * rule payload can simply be typed in as "01 02 03".
      */
     public static byte[] parseHexDump(String text) {
+        String[] lines = text.split("\n", -1);
+        boolean dump = looksLikeDump(lines);
+
         StringBuilder hex = new StringBuilder();
-        for (String line : text.split("\n", -1)) {
-            String body = line.length() > OFFSET_WIDTH ? line.substring(OFFSET_WIDTH) : "";
+        for (String line : lines) {
+            String body = dump && line.length() > OFFSET_WIDTH ? line.substring(OFFSET_WIDTH) : line;
             for (int i = 0; i < body.length(); i++) {
                 char c = body.charAt(i);
                 if (Character.digit(c, 16) >= 0) {
@@ -63,6 +68,37 @@ public final class PacketHex {
             result[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
         }
         return result;
+    }
+
+    /**
+     * True if every non-empty line carries a {@link #formatHex} offset column:
+     * eight hex digits, two spaces, and offsets that step by {@link #BYTES_PER_LINE}.
+     * Hand-typed hex fails this test, so its leading digits are kept as data.
+     */
+    private static boolean looksLikeDump(String[] lines) {
+        long expected = -1;
+        boolean any = false;
+        for (String line : lines) {
+            if (line.trim().isEmpty()) continue;
+            if (line.length() < OFFSET_WIDTH
+                    || line.charAt(8) != ' ' || line.charAt(9) != ' ') {
+                return false;
+            }
+            long offset;
+            try {
+                offset = Long.parseLong(line.substring(0, 8), 16);
+            } catch (NumberFormatException e) {
+                return false;
+            }
+            if (expected < 0) {
+                if (offset % BYTES_PER_LINE != 0) return false; // first line of a dump is aligned
+            } else if (offset != expected) {
+                return false;
+            }
+            expected = offset + BYTES_PER_LINE;
+            any = true;
+        }
+        return any;
     }
 
     /** Parses edited ASCII text back into bytes (each char mapped to a single byte). */
