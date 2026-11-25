@@ -11,19 +11,14 @@ import java.util.Arrays;
  * numeric type (with endianness), and a checksum calculator (Modular Sum / XOR)
  * over the selected byte range.
  *
- * The caret-to-byte-index math must match the layout produced by
- * ProxyApp.formatHex(): "%08X  " offset column, 16 bytes per line as "XX ",
- * with one extra space after the 8th byte.
+ * The caret-to-byte-index math follows {@link PacketHex#formatBody}, the layout
+ * the hex view shows (offsets live in a separate, non-editable gutter).
  */
 public class HexUtilPanel extends JPanel {
 
-    private static final int BYTES_PER_LINE = 16;
-    private static final int OFFSET_WIDTH = 10;
-    // offset column + 16 * "XX " + mid-line gap + '\n'
-    private static final int LINE_STRIDE = OFFSET_WIDTH + BYTES_PER_LINE * 3 + 1 + 1;
-
     private final JTextArea hexArea;
     private byte[] data = new byte[0];
+    private int bytesPerLine = 16;
 
     // Data converter tool
     private final JComboBox<String> endianCombo = new JComboBox<>(new String[]{
@@ -92,6 +87,12 @@ public class HexUtilPanel extends JPanel {
         refresh();
     }
 
+    /** Tells the tools how many bytes the hex view shows per line. */
+    public void setBytesPerLine(int bytesPerLine) {
+        this.bytesPerLine = bytesPerLine;
+        refresh();
+    }
+
     private void refresh() {
         updateConvertedValue();
         updateChecksum();
@@ -152,20 +153,12 @@ public class HexUtilPanel extends JPanel {
 
     /** Maps a caret position in the hex dump to the index of the byte under it. */
     private int byteIndexFromCaret(int pos) {
-        if (pos < 0) return 0;
-        int line = pos / LINE_STRIDE;
-        int rel = pos % LINE_STRIDE - OFFSET_WIDTH;
-        if (rel < 0) rel = 0;
-        if (rel >= 8 * 3 + 1) rel -= 1; // absorb the mid-line gap before the 9th byte
-        int byteInLine = Math.min(rel / 3, BYTES_PER_LINE - 1);
-        return line * BYTES_PER_LINE + byteInLine;
+        return PacketHex.byteIndexAt(pos, bytesPerLine);
     }
 
-    /** Position of the first hex digit of byte {@code index} in the dump text. */
+    /** Position of the first hex digit of byte {@code index} in the hex view. */
     private int byteDigitPos(int index) {
-        int line = index / BYTES_PER_LINE;
-        int i = index % BYTES_PER_LINE;
-        return line * LINE_STRIDE + OFFSET_WIDTH + i * 3 + (i >= 8 ? 1 : 0);
+        return PacketHex.nibblePosition(index * 2, bytesPerLine);
     }
 
     private static int neededBytes(String type) {

@@ -66,4 +66,38 @@ public class PacketHexTest {
         assertArrayEquals(data, PacketHex.fromCompactHex("000F10FF80"));
         assertArrayEquals(data, PacketHex.fromCompactHex("00 0F 10 FF 80"));
     }
+
+    @Test
+    @DisplayName("editor body lays digits out in byte pairs, 16 per line, without offsets")
+    void formatsEditorBody() {
+        assertEquals("12 31 23 1", PacketHex.formatBody("1231231", 16));
+        String full = PacketHex.formatBody("000102030405060708090A0B0C0D0E0F10", 16);
+        assertEquals("00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F\n10", full);
+        assertEquals("00000000\n00000010", PacketHex.formatOffsets(34, 16));
+        assertEquals("00000000", PacketHex.formatOffsets(0, 16));
+        assertEquals("00 01 02 03 04 05 06 07", PacketHex.formatColumnHeader(8));
+        for (int bpl : PacketHex.BYTES_PER_LINE_CHOICES) {
+            StringBuilder digits = new StringBuilder();
+            for (int i = 0; i < bpl * 3 + 5; i++) digits.append(String.format("%02X", i & 0xFF));
+            String body = PacketHex.formatBody(digits.toString(), bpl);
+            // positions line up with the laid-out text, and map back to their byte
+            for (int n = 0; n < digits.length(); n++) {
+                int pos = PacketHex.nibblePosition(n, bpl);
+                assertEquals(n, PacketHex.nibbleCountBefore(body, pos));
+                assertEquals(n / 2, PacketHex.byteIndexAt(pos, bpl));
+            }
+            assertEquals(String.format("%08X", bpl * 2), PacketHex.formatOffsets(digits.length(), bpl).split("\n")[2]);
+        }
+    }
+
+    @Test
+    @DisplayName("pasted text is reduced to its hex digits")
+    void extractsPastedHex() {
+        assertEquals("1231231231232", PacketHex.extractHexDigits("1231231231232"));
+        assertEquals("1231AB", PacketHex.extractHexDigits("12 31 ab"));
+        assertEquals("1231AB", PacketHex.extractHexDigits("0x12, 0x31, 0xAB"));
+        byte[] data = new byte[20];
+        for (int i = 0; i < data.length; i++) data[i] = (byte) i;
+        assertEquals(PacketHex.toCompactHex(data), PacketHex.extractHexDigits(PacketHex.formatHex(data)));
+    }
 }
