@@ -56,6 +56,8 @@ public class TransformRuleDialog extends JDialog {
 
         FlatButton okButton = new FlatButton("확인", UiTheme.SUCCESS, UiTheme.SUCCESS_HOVER);
         FlatButton cancelButton = new FlatButton("취소", UiTheme.NEUTRAL, UiTheme.NEUTRAL_HOVER);
+        FlatButton maximizeButton = new FlatButton("최대화", UiTheme.ACCENT, UiTheme.ACCENT_HOVER);
+        maximizeButton.addActionListener(e -> maximizeButton.setText(toggleMaximized() ? "원래 크기" : "최대화"));
         okButton.addActionListener(e -> onOk());
         cancelButton.addActionListener(e -> {
             confirmed = false;
@@ -68,6 +70,7 @@ public class TransformRuleDialog extends JDialog {
         south.add(enabledCheck, BorderLayout.WEST);
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         buttons.setOpaque(false);
+        buttons.add(maximizeButton);
         buttons.add(okButton);
         buttons.add(cancelButton);
         south.add(buttons, BorderLayout.EAST);
@@ -83,8 +86,35 @@ public class TransformRuleDialog extends JDialog {
         add(content, BorderLayout.CENTER);
         add(south, BorderLayout.SOUTH);
 
+        setResizable(true);
+        setMinimumSize(new Dimension(700, 420));
         setSize(1300, 640);
         setLocationRelativeTo(owner);
+    }
+
+    /** Bounds to return to when leaving the maximized state; null while not maximized. */
+    private Rectangle restoreBounds;
+
+    /**
+     * Dialogs have no maximize button on Windows, so this fills the usable area
+     * of the current screen (taskbar excluded) or restores the previous bounds.
+     *
+     * @return true if the dialog is now maximized
+     */
+    private boolean toggleMaximized() {
+        if (restoreBounds != null) {
+            setBounds(restoreBounds);
+            restoreBounds = null;
+            return false;
+        }
+        restoreBounds = getBounds();
+        GraphicsConfiguration gc = getGraphicsConfiguration();
+        Rectangle screen = gc.getBounds();
+        Insets insets = Toolkit.getDefaultToolkit().getScreenInsets(gc);
+        setBounds(screen.x + insets.left, screen.y + insets.top,
+                screen.width - insets.left - insets.right,
+                screen.height - insets.top - insets.bottom);
+        return true;
     }
 
     private void onOk() {
